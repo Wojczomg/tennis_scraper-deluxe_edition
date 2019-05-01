@@ -1,0 +1,142 @@
+import scrapy
+import json
+from scrapy.http.headers import Headers
+import re
+import csv
+
+RENDER_HTML_URL = "http://192.168.99.100:8050/render.html"
+x = {'Host': 'd.flashscore.pl',
+    'User-Agent': 'core',
+    'Accept': '* / *',
+    'Accept-Language': '*',
+    'Accept-Encoding': 'gzip, deflate, br',
+    'Referer': 'https://d.flashscore.pl/x/feed/proxy-local',
+    'X-Fsign': 'SW9D1eZo',
+    'X-Requested-With':'XMLHttpRequest',
+    'Connection':'keep-alive',
+    'Cookie':'_ga=GA1.2.311004931.1474208723; cto_lwid=fd4fea48-8382-4c8f-9882-c3be9fb779af; cto_idcpy=20baafa8-f81a-47ef-b19a-c3cd9ca08897;_gid=GA1.2.1084902017.1554631733;_sessionhits_UA-191939-4=2'}
+
+
+class MySpider(scrapy.Spider):
+    start_urls = ["https://www.flashscore.pl/tenis/rankingi/atp/"]
+    name="tenisik"
+
+    def start_requests(self):
+        for url in self.start_urls:
+            body = json.dumps({"url": url, "wait": 5}, sort_keys=True)
+            headers = Headers({'Content-Type': 'application/json'})
+            yield scrapy.Request(RENDER_HTML_URL, self.parse, method="POST",
+                                 body=body, headers=headers)
+
+    def parse(self, response):
+        yield {"AAAAAAAAA": len(response.css("tr.rank-row").css("a::attr(href)").getall())}
+        for i in response.css("tr.rank-row").css("a::attr(href)").getall()[:1]:
+            body = json.dumps({"url": "https://www.flashscore.pl"+i+"/wyniki/", "wait": 5}, sort_keys=True)
+            headers = Headers({'Content-Type': 'application/json'})
+            req = scrapy.Request(RENDER_HTML_URL, self.parse_player, method="POST",
+                                 body=body, headers=headers)
+            req.meta["player"] = i[10:-9]
+            yield req
+
+    def parse_player(self, response):
+        player_name = response.meta["player"]
+        player_id=response.css("div.page-tabs").css("ul.ifmenu").css("li.li0").css("a::attr(href)").get()[-9:-1]
+        country_id=response.css("h2.tournament").css("span::attr(class)").getall()[1][8:]
+        codes_0 = response.css("div#matches-block-results_s").css("table.tennis").css("tbody").css(
+            "tr.stage-finished::attr(id)").getall()
+        for i in range(1,15):
+            url="https://d.flashscore.pl/x/feed/pr_2_{}_{}_{}_2_pl_1_s".format(country_id,player_id,i)
+            req = scrapy.Request(url, method='GET', body='{"filters": []}', headers=x,
+                                 callback=self.parse_player_loadmore)
+            req.meta["player"] = player_name
+            yield req
+
+        for i in codes_0:
+            body = json.dumps({"url": "https://www.flashscore.pl/mecz/{}/#szczegoly-meczu".format(i[4:]),
+                               "wait": 5}, sort_keys=True)
+            headers = Headers({'Content-Type': 'application/json'})
+            req = scrapy.Request(RENDER_HTML_URL, self.parse_match_main, method="POST",
+                                 body=body, headers=headers)
+            req.meta["player"] = player_name
+            req.meta["match_code"]=i[4:]
+            yield req
+
+
+        yield {"AAAAAAAA": codes_0,
+               "BBBBBB":response.css("h2.tournament").css("span::attr(class)").getall()[1][8:],
+               "CCCCCC":player_id}
+
+    def parse_player_loadmore(self,response):
+        player_name = response.meta["player"]
+        codes_loadmore=re.findall(r'÷[\w]{8}¬',response.text)
+        for i in codes_loadmore:
+            body = json.dumps({"url": "https://www.flashscore.pl/mecz/{}/#szczegoly-meczu".format(i[1:-1]),
+                               "wait": 5}, sort_keys=True)
+            headers = Headers({'Content-Type': 'application/json'})
+            req = scrapy.Request(RENDER_HTML_URL, self.parse_match_main, method="POST",
+                                 body=body, headers=headers)
+            req.meta["player"] = player_name
+            req.meta["match_code"] = i
+            yield req
+
+
+        yield{"AAAAAAAA":len(re.findall(r'÷[\w]{8}¬',response.text))}
+    def parse_match_main(self,response):
+        player_name = response.meta["player"]
+        player_sur = player_name[:player_name.find("-")]
+        if response.css("div#detail::attr(class)").get() == "sport-tennis" and\
+                (response.css("div.tname__text").css("a::text")[0].get().lower().find(player_sur) or
+                 response.css("div.tname__text").css("a::text")[1].get().lower().find(player_sur)):
+            yield {"AAAAAAAA": response.css("div.tname__text").css("a::text")[0].get(),
+                   "BBBBBBBB": response.css("div.tname__text").css("a::text")[1].get(),
+                   "CCCCCC": [response.css("span.p1_home::text").get(),
+                              response.css("span.p1_away::text").get(),
+                              response.css("span.p2_home::text").get(),
+                              response.css("span.p2_away::text").get(),
+                              response.css("span.p3_home::text").get(),
+                              response.css("span.p3_away::text").get()],
+                   "DDDDDD": [response.css("span.odds-wrap::text")[0].get(),
+                              response.css("span.odds-wrap::text")[1].get()],
+                   "FFFFFFFFFFF":player_name
+                   }
+            url_stats = "https://www.flashscore.pl/mecz/{}/#statystyki-meczu;0".format(response.meta["match_code"])
+            body = json.dumps({"url": url_stats, "wait": 5}, sort_keys=True)
+            headers = Headers({'Content-Type': 'application/json'})
+            req = scrapy.Request(RENDER_HTML_URL, self.parse_match_stats, method="POST",
+                                 body=body, headers=headers)
+            req.meta["player"] = player_name
+            req.meta["participant1"] = response.css("div.tname__text").css("a::text")[0].get()
+            req.meta["participant2"] = response.css("div.tname__text").css("a::text")[1].get()
+            req.meta["time"] = response.css("div#utime::text").get()
+            req.meta["p1_home"] = response.css("span.p1_home::text").get()
+            req.meta["p1_away"] = response.css("span.p1_away::text").get()
+            req.meta["p2_home"] = response.css("span.p2_home::text").get()
+            req.meta["p2_away"] = response.css("span.p2_away::text").get()
+            req.meta["p3_home"] = response.css("span.p3_home::text").get()
+            req.meta["p3_away"] = response.css("span.p3_away::text").get()
+            req.meta["odds_1"] = response.css("span.odds-wrap::text")[0].get()
+            req.meta["odds_2"] = response.css("span.odds-wrap::text")[1].get()
+            yield req
+
+    @staticmethod
+    def parse_match_stats(response):
+
+        player_name = response.meta["player"]
+        stats_home = response.css("div.statText--homeValue::text").getall()
+        stats_away = response.css("div.statText--awayValue::text").getall()
+        row = []
+        row.append(hash(response.meta["time"]+response.meta["participant1"]+response.meta["participant2"]))
+        row.extend([response.meta["participant1"], response.meta["participant2"], response.meta["time"],
+                     response.meta["p1_home"], response.meta["p1_away"], response.meta["p2_home"], response.meta["p2_away"],
+                     response.meta["p3_home"], response.meta["p3_away"], response.meta["odds_1"], response.meta["odds_2"]])
+        row.extend(stats_home)
+        row.extend(stats_away)
+        MySpider.csv_file_writer(row, player_name)
+        yield{"ROOOOOOW":row}
+    @staticmethod
+    def csv_file_writer(row,player):
+        with open('tennis-atp-100-singles/{}.csv'.format(player), 'a') as csvFile:
+            writer = csv.writer(csvFile)
+            writer.writerow(row)
+        csvFile.close()
+
